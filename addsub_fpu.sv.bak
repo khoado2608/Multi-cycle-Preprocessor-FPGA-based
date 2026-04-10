@@ -1,0 +1,15 @@
+module addsub_fpu(
+	input [8:0] fpu_in,
+	input AFin,
+	input GFin,
+	input AddSubF,
+	input [8:0] from_bus,
+	output logic [8:0] GF_out
+);
+logic [8:0] fpu_temp;
+logic [8:0] outfpu;
+register9bit regfromAF(.d_in(fpu_in), .clk(clk), .rst(rst), .enable(AFin), .d_out(fpu_temp));
+fpu fpublock(.so_a(fpu_temp), .so_b(from_bus), .select(AddSubF), .nor_res(outfpu));
+register9bit regfromGF(.d_in(outfpu), .clk(clk), .rst(rst), .enable(GFin), .d_out(GF_out));
+endmodule
+

@@ -1,0 +1,416 @@
+/*Each instruction can be encoded using the nine-bit format IIIXXXYYY called machine code, 
+where III specifies the instruction (opcode), XXX gives the Rx register, and YYY gives the Ry 
+register*/
+// The instruction is divided into three fields: opcode (III),
+// destination register (Rx), and source register (Ry).
+module processor(
+    input [8:0] IR, G,        // Instruction Register (9 bits)
+    input clk,             // Clock signal
+    input rst,             // Reset signal
+    input run,
+    output logic done,         // Done signal
+    output logic [8:0] buswires, // Bus wires (9 bits) 
+	output logic [7:0] Rinnew,
+    output logic [7:0] Routnew,
+    output logic goutsig,
+    output logic ainsig,
+    output logic addsubsig,
+    output logic dinsig,
+    output logic ginsig,
+    output logic addrinsig,
+    output logic doutinsig,
+    output logic gfin,
+    output logic gfout,
+    output logic afin,
+    output logic addsubf,
+    output logic wdsig,
+    output logic incrpcsig,
+	output logic [4:0] cur_st,
+	output logic r7_test
+   );
+logic [2:0] source_sel; // Mux between XXX and YYY for source register
+typedef enum logic [4:0] { 
+    T0 = 5'd0,      // load address
+    T1 = 5'd1,      //fetch1    --> wait mode
+    T2_1 = 5'd2,      //fetch2    --> load instruction
+    T2_2 = 5'd3,
+    T3 = 5'd4,      
+    T4 = 5'd5,
+    T5 = 5'd6,
+    T6 = 5'd7,
+    T7 = 5'd8,
+    T8 = 5'd9,
+    T9_0 = 5'd10,
+
+    T9 = 5'd11,  
+    T10 = 5'd12,
+    T10_0 = 5'd13,
+
+    T11 = 5'd14, 
+    T12 = 5'd15, 
+    T13 = 5'd16,
+	 T2_3 = 5'd17,
+	 T2_4 = 5'd18,
+	 T2_5 = 5'd19,
+	 T13_0 = 5'd20,
+
+     T14 = 5'd21,   //floating point
+     T15 = 5'd22,
+     T16 = 5'd23
+ } states;
+states current_state, next_state;
+
+// ================== Control Signals ==================
+logic IRin;
+logic [7:0] Rin;  // R0_in to R7_in (destination registers)
+logic [7:0] Rout; // R0_out to R7_out (source registers)
+logic [7:0] R_out, R_in;
+// ================== Register and ALU Instantiations ==================
+logic [8:0] IR_out;
+IR_block IRload(.clk(clk), .rst(rst), .ir_in(IRin), .Din(IR), .Dout(IR_out));
+
+logic [2:0] III; // Opcode (IR[8:6])
+logic [2:0] XXX; // Rx (IR[5:3])
+logic [2:0] YYY; // Ry (IR[2:0])
+assign III = IR_out[8:6];
+assign XXX = IR_out[5:3];
+assign YYY = IR_out[2:0];
+
+// ================== FSM State Transitions ==================
+always_ff @(posedge clk or posedge rst) begin
+    if (rst) current_state <= T0; // Reset to T0
+    else current_state <= next_state;
+end
+// ================== FSM Next State Logic ==================
+logic  RX_in, RY_out, RX_out, A_in, G_in, G_out, DIN_out, AddSub, incr_pc;
+logic AddRin, Doutin, W_D, R7mo;
+logic GF_in, AddSubF, AF_in, GF_out;
+always_comb begin
+    next_state = current_state;
+    case (current_state)
+        T0: next_state = (run)? T1:T0;  //load address
+        T1: next_state = T2_1;    //wait
+        T2_1: next_state = T2_2;
+        T2_2: begin
+                case(III)
+                    3'b000: next_state = T0;    // mv: single cycle move
+                    3'b001: next_state = T2_3;    // mvi: single cycle immediate
+                    3'b010: next_state = T3;    // add operation: cycle 1
+                    3'b011: next_state = T6;    // sub operation: cycle 1
+                    3'b100: next_state = T9;    //load operation:cycle 1
+                    3'b101: next_state = T11;      //st
+                    3'b110: next_state =  T13;   //mvnz
+                    3'b111: next_state = T14;
+                    default: next_state = T0;
+                endcase
+                end
+		T2_3: next_state = T2_4;	//mvi
+		T2_4: next_state = T0;
+
+        T3: next_state = T4;    //add2
+        T4: next_state = T5;    //add3
+        T5: next_state = T0;    //add_complete
+
+        T6: next_state = T7;    //sub2
+        T7: next_state = T8;    //sub3
+        T8: next_state = T0;    //sub_complete
+
+
+        T9: next_state = T10;   //load2
+        T10: next_state = T0;  //load3 : complete
+
+
+        T11: next_state = T12;  //st2
+        T12: next_state = T0;   //st_complete
+
+        T13: if(G != 0 ) begin
+            next_state = T13_0;
+        end else begin
+            next_state = T0;
+        end
+			T13_0: next_state = T0;
+        
+        T14: next_state = T15; //addf2
+        T15: next_state = T16; //addf3
+        T16: next_state = T0;
+    endcase
+end
+always_comb begin
+    IRin = 0; RX_in = 0; RY_out = 0; RX_out = 0;
+    A_in = 0; G_in = 0; G_out = 0; DIN_out = 0;
+    AddSub = 0; done = 0; incr_pc = 0; AddRin = 0; 
+    Doutin = 0; W_D = 0; R7mo = 0; r7_test = 0; GF_in = 0; AddSubF = 0; AF_in = 0; GF_out = 0;
+    case(current_state)
+        T0: begin
+		  r7_test = 1;
+        AddRin = 1;
+        incr_pc = (run)? 1'b1 : 1'b0; 
+        end
+        T1: begin
+		  
+            //wait state
+				 
+        end
+        T2_1: begin
+        IRin = 1;
+				
+        end
+        T2_2: begin
+            case(III)
+                3'b000: begin               // mv: single-cycle move
+                RY_out = 1;
+                RX_in = 1;
+                done = 1;
+            end
+            3'b001: begin               // mvi: single-cycle immediate move
+ 			r7_test = 1;
+        AddRin = 1;
+        incr_pc = 1;               
+            end
+            3'b010: begin               // add operation: cycle 1
+                RX_out = 1;
+                A_in = 1;
+            end
+            3'b011: begin               // sub operation: cycle 1
+                RX_out = 1;
+                A_in = 1;
+            end
+            3'b100: begin               //load cycle 1
+                RY_out = 1;
+                AddRin = 1;
+            end
+            3'b101: begin               //st cycle 1
+                RY_out = 1;
+                AddRin = 1;
+            end
+            3'b110: begin
+                
+            end
+				3'b111: begin
+					RX_out = 1;
+                AF_in = 1;
+				end
+            default: begin
+            end
+            endcase
+        end
+			T2_3: begin
+			//wait
+			end
+			T2_4: begin
+					DIN_out = 1;
+					 R7mo = 1;
+                RX_in = 1;
+                done = 1;
+			end
+			
+        T3: begin
+            case(III)
+            3'b010: begin               // add operation: cycle 2
+                RY_out = 1;
+                G_in = 1;  
+            end
+            default: begin
+            end
+            endcase
+        end
+
+        T4: begin
+            case(III)
+                3'b010: begin               // add operation: cycle 3
+                    G_out = 1;
+                    RX_in = 1;
+                end
+                default: begin
+                end
+            endcase
+        end
+
+        T5: begin
+            case(III)
+                3'b010: begin               // add complete
+                    done = 1;
+                end
+                default: begin
+                end
+            endcase
+        end
+
+        T6: begin
+            case(III)
+                3'b011: begin               // sub operation: cycle 1
+                RY_out = 1;
+                G_in = 1;
+                AddSub = 1;
+                end
+                default: begin
+                end
+            endcase
+        end
+        T7: begin
+            case(III)
+                3'b011: begin               // sub operation: cycle 2
+                G_out = 1;
+                RX_in = 1;
+                end
+                default: begin
+                end
+            endcase
+        end
+        T8: begin
+            case(III)
+                3'b011: begin               // sub operation: cycle 3
+						done = 1;
+                end
+                default: begin
+                end
+            endcase
+        end
+
+        T9: begin
+            case(III)
+                3'b100: begin
+
+                end
+                default: begin
+                end
+            endcase
+        end
+
+        T10: begin
+            case(III)
+                3'b100: begin
+                    DIN_out = 1;
+                    RX_in = 1;
+                    done = 1;					 
+                end
+                default: begin
+                end
+            endcase
+        end
+
+        T11: begin 
+            case(III)
+                3'b101: begin
+
+                end
+                default: begin
+                end 
+            endcase
+        end
+
+        T12: begin
+            case(III)
+                3'b101: begin 
+                    RX_out = 1;
+                    Doutin = 1;
+                    W_D = 1;
+                    done = 1;
+                end
+                default: begin
+                end
+            endcase
+        end
+			T13: begin
+			
+			end
+        T13_0: begin
+            case(III)
+                3'b110: begin
+                 RY_out = 1;
+                RX_in = 1;
+                done = 1;
+                end
+                default: begin
+                end
+            endcase
+        end
+        T14: begin
+            case(III)
+            3'b111: begin               // add operation: cycle 2
+                RY_out = 1;
+                GF_in = 1;
+            end
+            default: begin
+            end
+            endcase
+        end
+
+        T15: begin
+            case(III)
+                3'b111: begin               // add operation: cycle 3
+                    GF_out = 1;
+                    RX_in = 1;
+                end
+                default: begin
+                end
+            endcase
+        end
+
+        T16: begin
+            case(III)
+                3'b111: begin               // add complete
+                    done = 1;
+                end
+                default: begin
+                end
+            endcase
+        end
+    default: begin
+    IRin = 0; RX_in = 0; RY_out = 0; RX_out = 0;
+    A_in = 0; G_in = 0; G_out = 0; DIN_out = 0;
+    AddSub = 0; done = 0; incr_pc = 0; AddRin = 0; 
+    Doutin = 0; W_D = 0; R7mo = 0; r7_test = 0; GF_in = 0; AddSubF = 0; AF_in = 0; GF_out = 0;
+    end
+    endcase
+end
+
+// Destination Register Decoder (Rx)
+dec3to8 rx_decoder (
+  .W(XXX),  // XXX field
+  .En(1'b1),    // From control unit
+  .Y({Rin})
+);
+// Source Register Decoder (Ry)
+dec3to8 ry_decoder (
+  .W(YYY),   // YYY field
+  .En(1'b1),   // From control unit
+  .Y({Rout})
+);
+always_comb begin 
+        if (RX_out | RY_out) begin
+            if (RX_out) begin
+                R_out = Rin;
+            end else begin
+                R_out = Rout;
+            end
+        end else begin
+            R_out = 8'b00000000;
+        end
+        R_in[0] = Rin[0] & RX_in;
+        R_in[1] = Rin[1] & RX_in;
+        R_in[2] = Rin[2] & RX_in;
+        R_in[3] = Rin[3] & RX_in;
+        R_in[4] = Rin[4] & RX_in;
+        R_in[5] = Rin[5] & RX_in;
+        R_in[6] = Rin[6] & RX_in;
+        R_in[7] = Rin[7] & RX_in;
+    end
+// ================== Bus Multiplexer ==================
+assign Rinnew = R_in;
+assign Routnew = R_out;
+assign dinsig = DIN_out;
+assign ainsig = A_in;
+assign goutsig = G_out;
+assign addsubsig = AddSub;
+assign ginsig = G_in;
+assign addrinsig = AddRin;
+assign doutinsig = Doutin;
+assign wdsig = W_D;
+assign incrpcsig = incr_pc ;
+assign cur_st = current_state;
+assign afin = AF_in;
+assign gfin = GF_in;
+assign gfout = GF_out;
+assign addsubf = AddSubF;
+endmodule
